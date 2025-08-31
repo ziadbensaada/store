@@ -1,0 +1,7 @@
+Adding cache,
+sentiment treatement
+
+The app will now only process the first 5 articles to stay within rate limits
+There's a 2-second delay between processing each article
+If an article fails to process, it will show an error but continue with the next one
+You'll see a warning when the article limit is reached
