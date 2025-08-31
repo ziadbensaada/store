@@ -244,7 +244,8 @@ def create_admin_user():
                 username=admin_username,
                 email=admin_email,
                 password=admin_password,
-                role='admin'
+                role='admin',
+                interests=['Technology', 'Business']  # Default interests for admin
             )
             if user_id:
                 print(f"Admin user created with username: {admin_username}")

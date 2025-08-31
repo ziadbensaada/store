@@ -73,7 +73,7 @@ The output should be in JSON format:
                 time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
                 
             completion = client.chat.completions.create(
-                model="llama3-70b-8192",
+                model="llama-3.1-8b-instant",  # Using the latest stable model from Groq
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_input}

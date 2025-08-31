@@ -1,12 +1,27 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from typing import Dict, Any, List, Optional, Tuple
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import sys
 import os
 import logging
+from bson import ObjectId
+from models import search_history_collection
 from sentiment_analysis import analyze_sentiment
 from summarizer import generate_overall_summary
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from typing import Optional
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# JWT Configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here")
+ALGORITHM = "HS256"
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Configure logging
 logging.basicConfig(
@@ -19,6 +34,23 @@ logger = logging.getLogger(__name__)
 # Add the parent directory to the path so we can import news_fetcher3
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from news_fetcher3 import get_news_about
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> Optional[Dict]:
+    """Get the current user from the JWT token"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+        return {"user_id": user_id, "username": payload.get("username")}
+    except JWTError:
+        return None
 
 class SearchQuery(BaseModel):
     query: str
@@ -42,7 +74,8 @@ def analyze_article_sentiment(article_id: str, query: str, content: str) -> Dict
                 "keywords": []
             }
             
-        logger.info(f"Analyzing sentiment for article: {article_id}")
+        logger.info(f"Analyzing sentiment for article: {article_id} with query: {query}")
+        # Use the query as the company name for sentiment analysis
         sentiment = analyze_sentiment(query, content)
         if not sentiment:
             return {
@@ -115,8 +148,43 @@ def get_recommended_articles(interests: List[str], max_articles: int = 10) -> Li
     logger.info(f"Total recommended articles found: {len(recommended)}")
     return recommended
 
+async def log_search(user_id: str, query: str, results_count: int, articles: List[Dict] = None):
+    """Log a search query to the database"""
+    try:
+        search_log = {
+            "user_id": user_id,
+            "query": query,
+            "timestamp": datetime.utcnow(),
+            "results_count": results_count,
+            "articles": []
+        }
+        
+        if articles:
+            # Store basic article info (not the full content to save space)
+            for article in articles[:10]:  # Limit to first 10 articles
+                clean_article = {
+                    "title": article.get("title", ""),
+                    "url": article.get("url", ""),
+                    "source": article.get("source", ""),
+                    "published_at": article.get("published_at", ""),
+                    "sentiment": article.get("sentiment", {})
+                }
+                search_log["articles"].append(clean_article)
+        
+        # Insert the search log
+        result = search_history_collection.insert_one(search_log)
+        logger.info(f"Logged search with ID: {result.inserted_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error logging search: {str(e)}")
+        return False
+
 @router.post("/search")
-async def search_articles(search_query: SearchQuery):
+async def search_articles(
+    search_query: SearchQuery, 
+    request: Request,
+    current_user: Optional[Dict] = Depends(get_current_user)
+):
     try:
         logger.info(f"Received search request: {search_query}")
         
@@ -142,6 +210,15 @@ async def search_articles(search_query: SearchQuery):
         for i, article in enumerate(articles):
             if 'id' not in article:
                 article['id'] = f'article_{i}_{hash(article.get("url", ""))}'
+        
+        # Log the search if user is authenticated
+        if current_user and search_query.query:
+            await log_search(
+                user_id=current_user["user_id"],
+                query=search_query.query,
+                results_count=len(articles),
+                articles=articles
+            )
         
         return {
             "query": search_query.query,

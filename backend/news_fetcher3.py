@@ -1959,7 +1959,7 @@ def get_news_about(query: str, max_articles: int = 50, start_date: str = None, e
     
     # Search RSS feeds
     logger.info("Searching RSS feeds...")
-    rss_articles = search_rss_feeds(query, max_articles * 2)  # Get more to account for date filtering
+    rss_articles = search_rss_feeds(query, max_articles)
     all_articles.extend(rss_articles)
     
     # Try to fetch from NewsAPI if available
@@ -2027,7 +2027,7 @@ def get_news_about(query: str, max_articles: int = 50, start_date: str = None, e
             logger.warning(f"Error saving to cache: {e}")
     
     # Return the requested number of articles
-    return unique_articles[:max_articles]
+    return unique_articles[:max_articles][:max_articles]
 
 if __name__ == "__main__":
     # Example usage
