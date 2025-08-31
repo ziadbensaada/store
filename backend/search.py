@@ -30,17 +30,28 @@ class SearchQuery(BaseModel):
 
 router = APIRouter()
 
-def analyze_article_sentiment(article: Dict, query: str) -> Dict:
-    """Analyze sentiment for a single article"""
+def analyze_article_sentiment(article_id: str, query: str, content: str) -> Dict:
+    """Analyze sentiment for a single article manually"""
     try:
-        content = f"{article.get('title', '')} {article.get('content', '')}"
         if not content.strip():
-            return {"score": 0, "label": "neutral"}
+            return {
+                "article_id": article_id,
+                "score": 0, 
+                "label": "neutral",
+                "summary": "",
+                "keywords": []
+            }
             
-        # Use the sentiment analysis module
+        logger.info(f"Analyzing sentiment for article: {article_id}")
         sentiment = analyze_sentiment(query, content)
         if not sentiment:
-            return {"score": 0, "label": "neutral"}
+            return {
+                "article_id": article_id,
+                "score": 0, 
+                "label": "neutral",
+                "summary": "",
+                "keywords": []
+            }
             
         # Map the sentiment score to a label
         score = float(sentiment.get("Score", 0))
@@ -52,14 +63,20 @@ def analyze_article_sentiment(article: Dict, query: str) -> Dict:
             label = "neutral"
             
         return {
+            "article_id": article_id,
             "score": score,
             "label": label,
             "summary": sentiment.get("Summary", ""),
             "keywords": sentiment.get("Keywords", [])
         }
     except Exception as e:
-        logger.error(f"Error analyzing sentiment: {str(e)}")
-        return {"score": 0, "label": "neutral"}
+        logger.error(f"Error analyzing sentiment for article {article_id}: {str(e)}")
+        return {
+            "article_id": article_id,
+            "score": 0, 
+            "label": "error",
+            "error": str(e)
+        }
 
 def get_recommended_articles(interests: List[str], max_articles: int = 10) -> List[Dict]:
     """Get recommended articles based on user interests"""
@@ -100,16 +117,12 @@ def get_recommended_articles(interests: List[str], max_articles: int = 10) -> Li
 
 @router.post("/search")
 async def search_articles(search_query: SearchQuery):
-    """
-    Search for articles using the news_fetcher3 module with sentiment analysis.
-    If no query is provided but user_interests are available, fetch recommended articles.
-    """
     try:
-        # Initialize articles list
-        articles = []
+        logger.info(f"Received search request: {search_query}")
         
-        # If we have a query, search for it
+        # Get articles based on search query or user interests
         if search_query.query:
+            logger.info(f"Performing search for query: {search_query.query}")
             articles = get_news_about(
                 query=search_query.query,
                 max_articles=search_query.max_articles,
@@ -117,71 +130,55 @@ async def search_articles(search_query: SearchQuery):
                 end_date=search_query.end_date
             )
             logger.info(f"Found {len(articles)} articles for query: {search_query.query}")
-        # If no query but we have user interests, get recommended articles
-        elif search_query.user_interests:
+        else:
+            logger.info("No search query provided, getting recommended articles")
             articles = get_recommended_articles(
-                interests=search_query.user_interests,
+                interests=search_query.user_interests or [],
                 max_articles=search_query.max_articles
             )
-            logger.info(f"Found {len(articles)} recommended articles based on user interests")
+            logger.info(f"Found {len(articles)} recommended articles")
         
-        if not articles:
-            return {
-                "total_count": 0,
-                "articles": [],
-                "overall_sentiment": "neutral",
-                "overall_score": 0,
-                "summary": "No articles found. Please try a different search or check back later."
-            }
-        
-        # Process articles with sentiment analysis
-        processed_articles = []
-        for article in articles:
-            try:
-                # Use the query or the first interest for sentiment analysis
-                query_for_sentiment = search_query.query or (search_query.user_interests[0] if search_query.user_interests else "")
-                sentiment = analyze_article_sentiment(article, query_for_sentiment)
-                processed_articles.append({
-                    **article,
-                    "sentiment": sentiment
-                })
-            except Exception as e:
-                logger.error(f"Error processing article: {str(e)}")
-                continue
-        
-        # Calculate overall sentiment
-        if processed_articles:
-            scores = [a["sentiment"]["score"] for a in processed_articles if a.get("sentiment")]
-            overall_score = sum(scores) / len(scores) if scores else 0
-            if overall_score >= 0.1:
-                overall_sentiment = "positive"
-            elif overall_score <= -0.1:
-                overall_sentiment = "negative"
-            else:
-                overall_sentiment = "neutral"
-        else:
-            overall_score = 0
-            overall_sentiment = "neutral"
-            
-        # Generate summary
-        if search_query.query:
-            summary = generate_overall_summary(
-                search_query.query,
-                [a["content"] for a in processed_articles if a.get("content")]
-            ) or f"Found {len(processed_articles)} articles about {search_query.query}"
-        elif search_query.user_interests:
-            summary = f"Found {len(processed_articles)} articles based on your interests: {', '.join(search_query.user_interests)}"
+        # Add article IDs if not present
+        for i, article in enumerate(articles):
+            if 'id' not in article:
+                article['id'] = f'article_{i}_{hash(article.get("url", ""))}'
         
         return {
-            "total_count": len(processed_articles),
-            "articles": processed_articles,
-            "overall_sentiment": overall_sentiment,
-            "overall_score": overall_score,
-            "summary": summary
+            "query": search_query.query,
+            "articles": articles,
+            "total_count": len(articles)
         }
         
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
+        )
+
+class SentimentAnalysisRequest(BaseModel):
+    content: str
+    query: str
+
+@router.post("/analyze-sentiment/{article_id}")
+async def analyze_sentiment_endpoint(article_id: str, request: SentimentAnalysisRequest):
+    """Endpoint to analyze sentiment for a single article"""
+    try:
+        logger.info(f"Analyzing sentiment for article: {article_id}")
+        logger.info(f"Content length: {len(request.content)} chars, Query: {request.query}")
+        
+        if not request.content.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Content cannot be empty"
+            )
+            
+        result = analyze_article_sentiment(article_id, request.query, request.content)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in sentiment analysis: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to analyze sentiment: {str(e)}"
         )
