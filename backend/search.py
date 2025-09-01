@@ -148,11 +148,31 @@ def get_recommended_articles(interests: List[str], max_articles: int = 10) -> Li
     logger.info(f"Total recommended articles found: {len(recommended)}")
     return recommended
 
-async def log_search(user_id: str, query: str, results_count: int, articles: List[Dict] = None):
+async def log_search(user_id: str, query: str, results_count: int, articles: List[Dict] = None, current_user: Dict = None):
     """Log a search query to the database"""
     try:
+        # Get username from current_user if available, otherwise use user_id
+        username = None
+        if current_user and isinstance(current_user, dict):
+            username = current_user.get('username')
+        
+        # If we still don't have a username, try to get it from the users collection
+        if not username and user_id and user_id != "admin":
+            from bson import ObjectId
+            try:
+                user = users_collection.find_one({"_id": ObjectId(user_id)})
+                if user:
+                    username = user.get('username')
+            except:
+                pass
+        
+        # If still no username, use the user_id as a fallback
+        if not username:
+            username = str(user_id) if user_id else "Unknown User"
+        
         search_log = {
             "user_id": user_id,
+            "username": username,  # Store the resolved username
             "query": query,
             "timestamp": datetime.utcnow(),
             "results_count": results_count,
@@ -161,7 +181,7 @@ async def log_search(user_id: str, query: str, results_count: int, articles: Lis
         
         if articles:
             # Store basic article info (not the full content to save space)
-            for article in articles[:10]:  # Limit to first 10 articles
+            for article in articles:  # Store all articles, not just first 10
                 clean_article = {
                     "title": article.get("title", ""),
                     "url": article.get("url", ""),
@@ -213,11 +233,14 @@ async def search_articles(
         
         # Log the search if user is authenticated
         if current_user and search_query.query:
+            # For admin users, use "admin" as user_id, otherwise use the user's ID
+            user_id = "admin" if current_user.get("username") == "admin" else current_user["user_id"]
             await log_search(
-                user_id=current_user["user_id"],
+                user_id=user_id,
                 query=search_query.query,
                 results_count=len(articles),
-                articles=articles
+                articles=articles,
+                current_user=current_user  # Pass the current user to include username
             )
         
         return {

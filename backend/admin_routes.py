@@ -503,24 +503,90 @@ async def get_search_history(
     
     if start_date or end_date:
         date_query = {}
-        if start_date:
-            date_query["$gte"] = datetime.fromisoformat(start_date)
-        if end_date:
-            # Add one day to include the entire end date
-            end = datetime.fromisoformat(end_date) + timedelta(days=1)
-            date_query["$lt"] = end
-        search_query["timestamp"] = date_query
+        try:
+            if start_date:
+                # Parse the date string and convert to datetime
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                date_query["$gte"] = start_dt
+            if end_date:
+                # Parse the date string and convert to datetime, add one day to include the entire end date
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                end_dt = end_dt + timedelta(days=1)
+                date_query["$lt"] = end_dt
+            search_query["timestamp"] = date_query
+        except ValueError as e:
+            # If date parsing fails, log the error but don't filter by date
+            print(f"Date parsing error: {e}. Dates: start_date={start_date}, end_date={end_date}")
+            # Continue without date filtering
     
     # Get total count for pagination
     total = search_history_collection.count_documents(search_query)
     
+    # Get all users first for efficient lookups
+    all_users = {}
+    for user in users_collection.find({}):
+        all_users[str(user['_id'])] = {
+            'username': user.get('username', 'Unknown User'),
+            'role': user.get('role', 'user')
+        }
+    
     # Get paginated results
     history = []
     for item in search_history_collection.find(search_query).sort("timestamp", -1).skip(skip).limit(limit):
-        item["_id"] = str(item["_id"])
-        if "user_id" in item:
-            item["user_id"] = str(item["user_id"])
-        history.append(item)
+        user_id = str(item.get("user_id", ""))
+        
+        # Debug logging
+        print(f"Processing search history item: {item.get('_id')}")
+        print(f"User ID: {user_id}")
+        print(f"Item data: {item}")
+        
+        # Get username from the item first
+        username = item.get("username")
+        print(f"Username from item: {username}")
+        
+        # If username not found in item, try to get it from users collection
+        if not username:
+            print("Username not found in item, checking users collection...")
+            if user_id == "admin":
+                username = "admin"
+            elif user_id in all_users:
+                user_data = all_users[user_id]
+                username = user_data.get('username', 'Unknown User')
+                print(f"Found user in all_users: {username}")
+            else:
+                print(f"User ID {user_id} not found in all_users")
+                username = "Unknown User"
+        
+        # Prepare user info
+        user_info = None
+        if user_id == "admin":
+            user_info = {"username": "admin", "role": "admin"}
+        elif user_id in all_users:
+            user_data = all_users[user_id]
+            user_info = {
+                "username": user_data.get('username', 'Unknown User'),
+                "role": user_data.get('role', 'user')
+            }
+        else:
+            # If user not found, create a basic user info with the username we have
+            user_info = {"username": username, "role": "user"}
+            
+        print(f"Final username: {username}")
+        print(f"Final user_info: {user_info}")
+        
+        # Transform the item to match frontend expectations
+        transformed_item = {
+            "_id": str(item["_id"]),
+            "query": item.get("query", ""),
+            "userId": user_id,
+            "username": username,
+            "user": user_info or {"username": username, "role": "user" if user_id != "admin" else "admin"},
+            "timestamp": item.get("timestamp"),
+            "results": item.get("articles", []),
+            "results_count": item.get("results_count", 0),
+            "articles": item.get("articles", [])
+        }
+        history.append(transformed_item)
     
     return {
         "data": history,
@@ -528,6 +594,89 @@ async def get_search_history(
         "skip": skip,
         "limit": limit
     }
+
+@router.delete("/search/history/{history_id}")
+async def delete_search_history(
+    history_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete a specific search history item (admin only)"""
+    try:
+        # Validate ObjectId
+        from bson import ObjectId
+        if not ObjectId.is_valid(history_id):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid history ID format"
+            )
+        
+        # Check if the item exists
+        item = search_history_collection.find_one({"_id": ObjectId(history_id)})
+        if not item:
+            raise HTTPException(
+                status_code=404,
+                detail="Search history item not found"
+            )
+        
+        # Delete the item
+        result = search_history_collection.delete_one({"_id": ObjectId(history_id)})
+        
+        if result.deleted_count == 1:
+            return {"message": "Search history item deleted successfully"}
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete search history item"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting search history: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+@router.delete("/search/history")
+async def delete_multiple_search_history(
+    history_ids: List[str],
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete multiple search history items (admin only)"""
+    try:
+        from bson import ObjectId
+        
+        # Validate all ObjectIds
+        valid_ids = []
+        for history_id in history_ids:
+            if ObjectId.is_valid(history_id):
+                valid_ids.append(ObjectId(history_id))
+            else:
+                logger.warning(f"Invalid ObjectId format: {history_id}")
+        
+        if not valid_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid history IDs provided"
+            )
+        
+        # Delete the items
+        result = search_history_collection.delete_many({"_id": {"$in": valid_ids}})
+        
+        return {
+            "message": f"Successfully deleted {result.deleted_count} search history items",
+            "deleted_count": result.deleted_count
+        }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting multiple search history items: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 @router.get("/search/analytics")
 async def get_search_analytics(
@@ -540,13 +689,21 @@ async def get_search_analytics(
     
     if start_date or end_date:
         date_query = {}
-        if start_date:
-            date_query["$gte"] = datetime.fromisoformat(start_date)
-        if end_date:
-            # Add one day to include the entire end date
-            end = datetime.fromisoformat(end_date) + timedelta(days=1)
-            date_query["$lt"] = end
-        match_query["timestamp"] = date_query
+        try:
+            if start_date:
+                # Parse the date string and convert to datetime
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                date_query["$gte"] = start_dt
+            if end_date:
+                # Parse the date string and convert to datetime, add one day to include the entire end date
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                end_dt = end_dt + timedelta(days=1)
+                date_query["$lt"] = end_dt
+            match_query["timestamp"] = date_query
+        except ValueError as e:
+            # If date parsing fails, log the error but don't filter by date
+            print(f"Date parsing error: {e}. Dates: start_date={start_date}, end_date={end_date}")
+            # Continue without date filtering
     
     # Get total searches
     total_searches = search_history_collection.count_documents(match_query)

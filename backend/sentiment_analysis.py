@@ -46,20 +46,39 @@ def analyze_sentiment(company: str, article_content: str) -> Optional[Dict[str, 
     if len(article_content) > max_article_length:
         article_content = article_content[:max_article_length] + "... [truncated]"
     
-    system_prompt = """You are a sentiment analysis model and summarizer. The user will give the company name and news article as input. 
-You have to analyze the news concerning the company to generate the output. You need to determine whether the news affects the company positively or negatively. 
-The output should be in JSON format:
+    system_prompt = """You are a financial news analyst. Return ONLY valid JSON with this exact format:
+
 {
-    "Score": , 
-    "Sentiment": , 
-    "Summary": , 
-    "Keywords": 
+    "Score": 0.75,
+    "Sentiment": "Positive",
+    "Summary": "Brief summary here",
+    "Keywords": ["keyword1", "keyword2", "keyword3"],
+    "Reasoning": "Brief reasoning here"
 }
-- Score must be in range [-1,+1] with 2 decimal places
-- Sentiment must be Positive/Neutral/Negative based on score
-- Summary should be 2-3 lines focusing on company impact
-- Keywords should be 3-5 most important topics
-- If the article is not relevant to the company, return neutral sentiment (0.0) and mention in the summary."""
+
+CRITICAL JSON RULES:
+- Score must be a number between -1.0 and 1.0 (no + sign, no quotes)
+- Sentiment must be exactly "Positive", "Neutral", or "Negative" (with quotes)
+- All strings must be in double quotes
+- No trailing commas
+- No extra text before or after JSON
+
+ANALYSIS RULES:
+- Problem-Solution Context: Articles about problems a company solves are often POSITIVE
+- Innovation/Progress: New developments and tech advances are usually POSITIVE  
+- Market Position: Company strength and competitive advantage are POSITIVE
+- Challenges as Opportunities: Challenges the company can handle are often POSITIVE
+
+SCORING:
+- 0.8 to 1.0: Extremely positive (major breakthrough, strong advantage)
+- 0.4 to 0.7: Positive (innovation, problem-solving, market strength)
+- 0.1 to 0.3: Slightly positive (minor positive developments)
+- -0.1 to 0.1: Neutral (no clear company impact)
+- -0.1 to -0.3: Slightly negative (minor concerns)
+- -0.4 to -0.7: Negative (significant problems, disadvantages)
+- -0.8 to -1.0: Extremely negative (major failures, serious issues)
+
+Focus on COMPANY impact. Return ONLY the JSON object."""
 
     user_input = f"Company: {company}\nNews Article (truncated if too long):\n{article_content}"
 
@@ -103,7 +122,9 @@ The output should be in JSON format:
         except Exception as e:
             if attempt == max_retries - 1:  # Last attempt
                 logger.error(f"Analysis failed after {max_retries} attempts: {str(e)}")
-                return None
+                # Try fallback sentiment analysis
+                logger.info("Attempting fallback sentiment analysis...")
+                return fallback_sentiment_analysis(company, article_content)
             
             if 'rate_limit' in str(e).lower() or '429' in str(e):
                 wait_time = retry_delay * (attempt + 1) * 2  # Exponential backoff
@@ -114,8 +135,102 @@ The output should be in JSON format:
     
     # If we get here, all retries failed
     return None
+
+def fallback_sentiment_analysis(company: str, article_content: str) -> Optional[Dict[str, str]]:
+    """
+    Fallback sentiment analysis using traditional NLP techniques
+    """
+    try:
+        import re
+        from collections import Counter
         
-    return None
+        # Clean and prepare text
+        text = article_content.lower()
+        
+        # Define sentiment word lists with context awareness
+        positive_words = {
+            'innovation', 'breakthrough', 'advance', 'improve', 'growth', 'profit', 'success',
+            'launch', 'release', 'announce', 'develop', 'create', 'build', 'expand',
+            'leadership', 'market leader', 'competitive', 'advantage', 'solution', 'solve',
+            'technology', 'digital', 'ai', 'artificial intelligence', 'machine learning',
+            'efficiency', 'performance', 'quality', 'award', 'recognition', 'partnership',
+            'investment', 'funding', 'revenue', 'sales', 'customer', 'user', 'adoption'
+        }
+        
+        negative_words = {
+            'failure', 'loss', 'decline', 'decrease', 'problem', 'issue', 'error',
+            'bug', 'crash', 'hack', 'breach', 'security', 'privacy', 'lawsuit',
+            'fine', 'penalty', 'regulation', 'ban', 'restrict', 'limit', 'delay',
+            'cancel', 'shutdown', 'bankruptcy', 'layoff', 'fired', 'resign', 'quit'
+        }
+        
+        # Context-aware positive patterns (problems that are opportunities)
+        positive_patterns = [
+            r'solve.*problem', r'address.*challenge', r'overcome.*obstacle',
+            r'innovative.*solution', r'breakthrough.*technology', r'leading.*industry',
+            r'market.*leader', r'competitive.*advantage', r'strategic.*partnership'
+        ]
+        
+        # Count positive and negative words
+        words = re.findall(r'\b\w+\b', text)
+        word_count = Counter(words)
+        
+        positive_score = sum(word_count[word] for word in positive_words if word in word_count)
+        negative_score = sum(word_count[word] for word in negative_words if word in word_count)
+        
+        # Check for positive patterns
+        pattern_score = 0
+        for pattern in positive_patterns:
+            if re.search(pattern, text):
+                pattern_score += 2  # Give extra weight to context-aware positives
+        
+        # Calculate final score
+        total_score = positive_score + pattern_score - negative_score
+        
+        # Normalize score to [-1, 1] range
+        if total_score > 0:
+            normalized_score = min(0.8, total_score / 10)  # Cap at 0.8 for fallback
+        elif total_score < 0:
+            normalized_score = max(-0.8, total_score / 10)  # Cap at -0.8 for fallback
+        else:
+            normalized_score = 0.0
+        
+        # Determine sentiment
+        if normalized_score > 0.1:
+            sentiment = "Positive"
+        elif normalized_score < -0.1:
+            sentiment = "Negative"
+        else:
+            sentiment = "Neutral"
+        
+        # Generate summary
+        if normalized_score > 0.3:
+            summary = f"Article shows positive developments for {company} with focus on innovation and market strength."
+        elif normalized_score > 0:
+            summary = f"Article has positive elements for {company} with some promising developments."
+        elif normalized_score < -0.3:
+            summary = f"Article contains concerning elements for {company} that may impact performance."
+        elif normalized_score < 0:
+            summary = f"Article has some negative aspects for {company} but overall impact is limited."
+        else:
+            summary = f"Article appears neutral for {company} with no clear positive or negative impact."
+        
+        # Extract keywords
+        keywords = [word for word, count in word_count.most_common(10) 
+                   if len(word) > 3 and word not in ['the', 'and', 'for', 'with', 'this', 'that']]
+        keywords = keywords[:5]  # Limit to 5 keywords
+        
+        return {
+            "Score": round(normalized_score, 2),
+            "Sentiment": sentiment,
+            "Summary": summary,
+            "Keywords": keywords,
+            "Reasoning": f"Fallback analysis based on word frequency and pattern matching. Positive words: {positive_score}, Negative words: {negative_score}, Pattern bonus: {pattern_score}"
+        }
+        
+    except Exception as e:
+        logger.error(f"Fallback sentiment analysis failed: {str(e)}")
+        return None
 
 # Example usage
 if __name__ == "__main__":

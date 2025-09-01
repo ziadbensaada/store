@@ -1456,13 +1456,22 @@ def extract_article_content(url: str) -> Optional[Dict[str, str]]:
         session = requests.Session()
         session.headers.update(headers)
         
-        # Configure retry strategy
-        retry_strategy = requests.adapters.HTTPAdapter(
-            max_retries=3,
-            status_forcelist=[408, 429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
-            backoff_factor=1
-        )
+        # Configure retry strategy with compatibility for different requests versions
+        try:
+            # Try newer requests version syntax
+            retry_strategy = requests.adapters.HTTPAdapter(
+                max_retries=3,
+                status_forcelist=[408, 429, 500, 502, 503, 504],
+                allowed_methods=["GET", "POST"],
+                backoff_factor=1
+            )
+        except TypeError:
+            # Fallback to older requests version syntax
+            retry_strategy = requests.adapters.HTTPAdapter(
+                max_retries=3,
+                status_forcelist=[408, 429, 500, 502, 503, 504],
+                backoff_factor=1
+            )
         session.mount("http://", retry_strategy)
         session.mount("https://", retry_strategy)
         logger.info(f"Fetching URL: {url}")
@@ -1846,6 +1855,12 @@ def search_rss_feeds(query: str, max_articles: int = 20) -> List[Dict[str, str]]
                         if rss_image:
                             entry_data['image_url'] = clean_url(rss_image)
                             logger.info(f"📸 Found RSS image: {entry_data['image_url']}")
+                        else:
+                            # Try permissive image extraction as fallback
+                            permissive_image = extract_image_permissive(entry, url)
+                            if permissive_image:
+                                entry_data['image_url'] = clean_url(permissive_image)
+                                logger.info(f"📸 Found permissive image: {entry_data['image_url']}")
                         
                         # Set publish date from entry if available
                         if hasattr(entry, 'published_parsed') and entry.published_parsed:
@@ -1880,6 +1895,28 @@ def search_rss_feeds(query: str, max_articles: int = 20) -> List[Dict[str, str]]
                                         entry_data['publish_date'] = article_data['publish_date']
                             except Exception as e:
                                 logger.warning(f"Error extracting article content from {url}: {e}")
+                        
+                        # If we still don't have an image, try one more time with the full article
+                        if not entry_data.get('image_url'):
+                            try:
+                                logger.info(f"🔍 No image found yet, trying full article extraction for: {url}")
+                                article_data = extract_article_content_with_robust_images(url)
+                                if article_data and article_data.get('image_url'):
+                                    entry_data['image_url'] = clean_url(article_data['image_url'])
+                                    logger.info(f"📸 Added image from full article extraction: {entry_data['image_url']}")
+                            except Exception as e:
+                                logger.debug(f"Error in full article image extraction: {e}")
+                        
+                        # Final fallback: try direct image extraction
+                        if not entry_data.get('image_url'):
+                            try:
+                                logger.info(f"🔍 Final fallback: trying direct image extraction for: {url}")
+                                direct_image = extract_image_from_url_direct(url)
+                                if direct_image:
+                                    entry_data['image_url'] = clean_url(direct_image)
+                                    logger.info(f"📸 Added image from direct extraction: {entry_data['image_url']}")
+                            except Exception as e:
+                                logger.debug(f"Error in direct image extraction: {e}")
                         
                         # Ensure we have some content
                         if not entry_data.get('content'):
@@ -1968,16 +2005,44 @@ def get_news_about(query: str, max_articles: int = 50, start_date: str = None, e
         logger.info("Trying NewsAPI...")
         api_articles = fetch_news_api(query, max_articles)
         
-        # Convert the format to match our structure
+        # Convert the format to match our structure and extract images
         for article in api_articles:
-            all_articles.append({
+            article_data = {
                 'title': article['title'],
                 'content': article['content'],
                 'url': article['url'],
                 'publish_date': article['publish_date'],
                 'source': urllib.parse.urlparse(article['url']).netloc,
                 'image_url': article.get('image_url')
-            })
+            }
+            
+            # If NewsAPI didn't provide an image, ALWAYS try to extract from the full article
+            if not article_data.get('image_url'):
+                try:
+                    logger.info(f"🔍 No NewsAPI image, extracting from full article: {article['url']}")
+                    full_article = extract_article_content_with_robust_images(article['url'])
+                    if full_article and full_article.get('image_url'):
+                        article_data['image_url'] = full_article['image_url']
+                        logger.info(f"📸 Extracted image from full article: {article_data['image_url']}")
+                    else:
+                        # Try alternative image extraction methods
+                        logger.info(f"🔍 Trying alternative image extraction for: {article['url']}")
+                        alt_image = extract_image_from_url_direct(article['url'])
+                        if alt_image:
+                            article_data['image_url'] = alt_image
+                            logger.info(f"📸 Extracted image using alternative method: {article_data['image_url']}")
+                except Exception as e:
+                    logger.debug(f"Error extracting image from NewsAPI article: {e}")
+                    # Try alternative method even if full article extraction fails
+                    try:
+                        alt_image = extract_image_from_url_direct(article['url'])
+                        if alt_image:
+                            article_data['image_url'] = alt_image
+                            logger.info(f"📸 Extracted image using alternative method after error: {article_data['image_url']}")
+                    except Exception as e2:
+                        logger.debug(f"Alternative image extraction also failed: {e2}")
+            
+            all_articles.append(article_data)
     except Exception as e:
         logger.warning(f"Error fetching from NewsAPI: {str(e)}")
     
@@ -2028,6 +2093,209 @@ def get_news_about(query: str, max_articles: int = 50, start_date: str = None, e
     
     # Return the requested number of articles
     return unique_articles[:max_articles][:max_articles]
+
+def extract_image_permissive(entry, base_url: str = '') -> Optional[str]:
+    """
+    More permissive image extraction that prioritizes finding images over strict validation
+    """
+    logger.info("🔍 Starting PERMISSIVE image extraction...")
+    
+    # Priority 1: Direct image fields (most reliable)
+    image_fields = ['image', 'image_url', 'thumbnail', 'thumbnail_url']
+    for field in image_fields:
+        if hasattr(entry, field):
+            url = getattr(entry, field, '').strip()
+            if url:
+                # Basic validation - just check if it looks like an image
+                if any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']) or 'image' in url.lower():
+                    full_url = make_absolute_url_robust(url, base_url)
+                    if full_url:
+                        logger.info(f"✅ Using direct image from {field}: {full_url}")
+                        return full_url
+    
+    # Priority 2: Media content
+    if hasattr(entry, 'media_content'):
+        media_list = entry.media_content if isinstance(entry.media_content, list) else [entry.media_content]
+        for media in media_list:
+            try:
+                if hasattr(media, 'get'):
+                    url = media.get('url', '').strip()
+                    if url and any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']):
+                        full_url = make_absolute_url_robust(url, base_url)
+                        if full_url:
+                            logger.info(f"✅ Using media content image: {full_url}")
+                            return full_url
+            except Exception as e:
+                logger.debug(f"Error processing media content: {e}")
+    
+    # Priority 3: Media thumbnails
+    if hasattr(entry, 'media_thumbnail'):
+        thumb_list = entry.media_thumbnail if isinstance(entry.media_thumbnail, list) else [entry.media_thumbnail]
+        for thumb in thumb_list:
+            try:
+                if hasattr(thumb, 'get'):
+                    url = thumb.get('url', '').strip()
+                else:
+                    url = str(thumb).strip()
+                
+                if url:
+                    full_url = make_absolute_url_robust(url, base_url)
+                    if full_url:
+                        logger.info(f"✅ Using media thumbnail: {full_url}")
+                        return full_url
+            except Exception as e:
+                logger.debug(f"Error processing thumbnail: {e}")
+    
+    # Priority 4: Enclosures
+    if hasattr(entry, 'enclosures') and entry.enclosures:
+        for enc in entry.enclosures:
+            try:
+                url = enc.get('href', '').strip()
+                if url and any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']):
+                    full_url = make_absolute_url_robust(url, base_url)
+                    if full_url:
+                        logger.info(f"✅ Using enclosure image: {full_url}")
+                        return full_url
+            except Exception as e:
+                logger.debug(f"Error processing enclosure: {e}")
+    
+    # Priority 5: HTML content parsing
+    content_fields = ['content', 'description', 'summary']
+    for field in content_fields:
+        if hasattr(entry, field):
+            field_value = getattr(entry, field, '')
+            if isinstance(field_value, list) and field_value:
+                for item in field_value:
+                    if hasattr(item, 'value'):
+                        html_content = str(item.value)
+                        # Look for img tags
+                        if '<img' in html_content:
+                            try:
+                                soup = BeautifulSoup(html_content, 'html.parser')
+                                img = soup.find('img')
+                                if img and img.get('src'):
+                                    url = img.get('src').strip()
+                                    full_url = make_absolute_url_robust(url, base_url)
+                                    if full_url:
+                                        logger.info(f"✅ Using HTML content image: {full_url}")
+                                        return full_url
+                            except Exception as e:
+                                logger.debug(f"Error parsing HTML content: {e}")
+            elif field_value and '<img' in str(field_value):
+                try:
+                    soup = BeautifulSoup(str(field_value), 'html.parser')
+                    img = soup.find('img')
+                    if img and img.get('src'):
+                        url = img.get('src').strip()
+                        full_url = make_absolute_url_robust(url, base_url)
+                        if full_url:
+                            logger.info(f"✅ Using HTML content image: {full_url}")
+                            return full_url
+                except Exception as e:
+                    logger.debug(f"Error parsing HTML content: {e}")
+    
+    logger.warning("❌ No permissive image found")
+    return None
+
+def extract_image_from_url_direct(url: str) -> Optional[str]:
+    """
+    Lightweight image extraction that only fetches the HTML head section for speed
+    """
+    logger.info(f"🔍 Starting DIRECT image extraction from: {url}")
+    
+    try:
+        # Use a shorter timeout and only fetch the head section
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        # First try to get just the head section for speed
+        response = requests.get(url, headers=headers, timeout=10, stream=True)
+        response.raise_for_status()
+        
+        # Read only the first part to get the head section
+        content = b""
+        for chunk in response.iter_content(chunk_size=8192):
+            content += chunk
+            if b'</head>' in content or len(content) > 50000:  # Stop at head end or 50KB
+                break
+        
+        # Parse the HTML head section
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        # Priority 1: Meta tags (most reliable)
+        meta_selectors = [
+            ('meta[property="og:image"]', 'content'),
+            ('meta[property="og:image:url"]', 'content'),
+            ('meta[name="twitter:image"]', 'content'),
+            ('meta[name="twitter:image:src"]', 'content'),
+            ('meta[itemprop="image"]', 'content'),
+            ('meta[name="thumbnail"]', 'content'),
+            ('link[rel="image_src"]', 'href'),
+            ('meta[property="og:image:secure_url"]', 'content'),
+        ]
+        
+        for selector, attr in meta_selectors:
+            try:
+                element = soup.select_one(selector)
+                if element and element.get(attr):
+                    img_url = element[attr].strip()
+                    if img_url:
+                        # Clean and validate URL
+                        clean_url = make_absolute_url_robust(img_url, url)
+                        if clean_url:
+                            logger.info(f"✅ Using meta tag image: {clean_url}")
+                            return clean_url
+            except Exception as e:
+                logger.debug(f"Error processing meta selector {selector}: {str(e)}")
+                continue
+        
+        # Priority 2: Look for any img tags in the head section
+        img_tags = soup.find_all('img')
+        for img in img_tags:
+            src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+            if src:
+                clean_url = make_absolute_url_robust(src, url)
+                if clean_url:
+                    logger.info(f"✅ Using img tag from head: {clean_url}")
+                    return clean_url
+        
+        # Priority 3: Look for any image-like URLs in the HTML
+        html_str = str(content)
+        # Find URLs that look like images
+        import re
+        image_patterns = [
+            r'https?://[^\s"\'<>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s"\'<>]*)?',
+            r'//[^\s"\'<>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s"\'<>]*)?',
+            r'/[^\s"\'<>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s"\'<>]*)?'
+        ]
+        
+        for pattern in image_patterns:
+            matches = re.findall(pattern, html_str, re.IGNORECASE)
+            for match in matches:
+                if match.startswith('//'):
+                    clean_url = f"https:{match}"
+                elif match.startswith('/'):
+                    parsed_uri = urllib.parse.urlparse(url)
+                    clean_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}{match}"
+                else:
+                    clean_url = match
+                
+                if clean_url and validate_image_url_robust(clean_url):
+                    logger.info(f"✅ Using regex-found image: {clean_url}")
+                    return clean_url
+        
+        logger.warning(f"❌ No direct image found for: {url}")
+        return None
+        
+    except Exception as e:
+        logger.debug(f"Error in direct image extraction: {e}")
+        return None
 
 if __name__ == "__main__":
     # Example usage
