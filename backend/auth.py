@@ -62,7 +62,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 @router.post("/register")
 async def register(user_data: UserCreate):
     # Validate domains/interests
-    if not all(domain in AVAILABLE_DOMAINS for domain in user_data.interests):
+    if user_data.interests and not all(domain in AVAILABLE_DOMAINS for domain in user_data.interests):
         raise HTTPException(status_code=400, detail="Invalid domain(s) provided")
     
     # Check if user already exists
@@ -70,18 +70,18 @@ async def register(user_data: UserCreate):
         raise HTTPException(status_code=400, detail="Username or email already registered")
     
     # Create user
-    user = create_user(
+    success, result = create_user(
         username=user_data.username,
         email=user_data.email,
         password=user_data.password,
         role=user_data.role,
-        interests=user_data.interests
+        interests=user_data.interests or []
     )
     
-    if not user[0]:  # create_user returns (user_id, error_message)
-        raise HTTPException(status_code=400, detail=user[1])
+    if not success:
+        raise HTTPException(status_code=400, detail=result)
         
-    return {"message": "User created successfully", "user_id": user[0]}
+    return {"success": True, "message": "User created successfully", "user_id": result}
 
 @router.post("/logout")
 async def logout(response: Response):

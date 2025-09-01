@@ -1,0 +1,32 @@
+=== gTTS Direct Test ===
+This script will test gTTS functionality directly.
+Note: An internet connection is required for gTTS to work.
+
+gTTS version: 2.5.4
+Testing gTTS with detailed output...
+
+1. Using temporary directory: C:\Users\A\AppData\Local\Temp
+2. Output file will be: C:\Users\A\AppData\Local\Temp\tts_test.mp3
+3. Creating gTTS object...
+4. Saving audio file...
+Traceback (most recent call last):
+  File "C:\Users\A\Documents\PersonaTracker\app\backend\direct_tts_test.py", line 25, in test_tts
+    print(f"\u2705 Success! Audio file created at: {output_file}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\A\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2705' in position 0: character maps to <undefined>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\A\Documents\PersonaTracker\app\backend\direct_tts_test.py", line 65, in <module>
+    success = test_tts()
+  File "C:\Users\A\Documents\PersonaTracker\app\backend\direct_tts_test.py", line 45, in test_tts
+    print(f"\u274c Error during TTS test: {str(e)}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\A\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u274c' in position 0: character maps to <undefined>

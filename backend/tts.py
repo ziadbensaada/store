@@ -48,21 +48,80 @@ async def translate_and_generate_audio(text: str, lang: str = "en", output_file:
         None: If TTS generation fails.
     """
     try:
-        # If language is not English, translate first
-        if lang != "en":
-            translated_text = await translate_to_hindi(text)
-            if not translated_text:
-                logger.error(f"Failed to translate text to {lang}")
-                return None
-            text = translated_text
+        logger.info(f"Starting audio generation (lang={lang}), text length: {len(text)} chars")
+        
+        # Validate input
+        if not text or not isinstance(text, str):
+            logger.error("Invalid text input")
+            return None
             
+        # Limit text length to prevent issues
+        text = text[:500]  # Limit to 500 characters
+        
+        # If language is not English, translate first
+        target_lang = lang
+        if lang != "en":
+            logger.info(f"Translating text to {lang}")
+            try:
+                translated_text = await translate_to_hindi(text)
+                if not translated_text:
+                    logger.error(f"Translation returned empty result")
+                    return None
+                text = translated_text
+                target_lang = 'hi'
+                logger.info(f"Translation completed, new text length: {len(text)} chars")
+            except Exception as e:
+                logger.error(f"Translation failed: {str(e)}", exc_info=True)
+                # Continue with original text if translation fails
+                logger.info("Continuing with original text")
+        
+        # Ensure output directory exists
+        output_dir = os.path.dirname(os.path.abspath(output_file))
+        if output_dir:  # Only create directory if output_file has a path
+            os.makedirs(output_dir, exist_ok=True)
+            logger.info(f"Ensured output directory exists: {output_dir}")
+        
         # Generate audio in the specified language
+        logger.info(f"Generating TTS for {len(text)} characters in language: {target_lang}")
         try:
-            tts = gTTS(text=text, lang=lang, slow=False)
-            tts.save(output_file)
-            return output_file
+            tts = gTTS(
+                text=text, 
+                lang=target_lang, 
+                slow=False,
+                lang_check=False  # Disable language check to prevent errors
+            )
+            
+            # Save to a temporary file first
+            temp_file = output_file + ".tmp"
+            tts.save(temp_file)
+            
+            # Rename to final filename after successful save
+            if os.path.exists(temp_file):
+                # Remove destination file if it exists
+                if os.path.exists(output_file):
+                    os.remove(output_file)
+                os.rename(temp_file, output_file)
+                
+                # Verify file was created and has content
+                if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                    file_size = os.path.getsize(output_file)
+                    logger.info(f"Successfully generated audio file: {output_file} ({file_size} bytes)")
+                    return output_file
+                else:
+                    logger.error(f"Output file is empty or was not created: {output_file}")
+                    return None
+            else:
+                logger.error(f"Temporary output file was not created: {temp_file}")
+                return None
+                
         except Exception as e:
-            logger.error(f"TTS generation failed: {str(e)}")
+            logger.error(f"TTS generation failed: {str(e)}", exc_info=True)
+            # Clean up any partial files
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
             return None
             
     except Exception as e:
